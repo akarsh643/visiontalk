@@ -1,0 +1,12 @@
+# Environments & Secrets
+.env
+.env.local
+venv/
+env/
+__pycache__/
+
+# Packages & Dependencies
+node_modules/
+*.logvenv/
+__pycache__/
+.env
