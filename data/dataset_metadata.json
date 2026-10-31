@@ -1,0 +1,5 @@
+{
+  "vocab_size": 2984,
+  "max_seq_len": 37,
+  "threshold": 5
+}
