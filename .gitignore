@@ -52,3 +52,4 @@ temp_uploaded_img.jpg
 .vscode/
 .DS_Store
 *.ipynb_checkpoints/*.mp3
+*.tflite
