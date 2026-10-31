@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: visiontalk_api
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: visiontalk_ui
+    ports:
+      - "8501:8501"
+    environment:
+      # Direct Streamlit container to the backend container via Docker's internal DNS
+      - API_URL=http://backend:8080
+    depends_on:
+      - backend
+    restart: unless-stopped

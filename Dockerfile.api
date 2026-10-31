@@ -1,0 +1,26 @@
+FROM python:3.10-slim
+
+# Prevent Python from writing .pyc files and enable unbuffered logging
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install system utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --default-timeout=500 -r requirements.txt
+
+# Copy source code, model weights, and metadata
+COPY api.py predict.py ./
+COPY models/ ./models/
+COPY data/word_to_idx.json data/dataset_metadata.json ./data/
+
+EXPOSE 8080
+
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
