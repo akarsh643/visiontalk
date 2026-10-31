@@ -41,7 +41,7 @@ def load_all_artifacts(
         word_to_idx = json.load(f)
     idx_to_word = {int(v): k for k, v in word_to_idx.items()}
 
-  # Load sequence metadata with fallback keys
+    # Sequence length metadata with fallback keys
     with open(meta_path, "r") as f:
         meta = json.load(f)
         max_len = meta.get("max_len") or meta.get("max_length") or meta.get("max_seq_len") or 34
@@ -104,49 +104,76 @@ def generate_caption_beam_search(
     idx_to_word,
     max_len,
     beam_index=3,
-    repetition_penalty=0.5
+    repetition_penalty=0.5,
+    min_length=5
 ):
-    """Generates a caption using Beam Search with length normalization and repetition penalty."""
+    """
+    Generates a caption using Beam Search with length normalization,
+    repetition penalty, and a minimum caption length guard.
+    """
     features = extract_features(img_path, feat_extractor)
 
     start_token = word_to_idx.get("startseq", 1)
     end_token = word_to_idx.get("endseq", 2)
+
+    # Each candidate: [token_list, cumulative_log_prob]
     candidates = [[[start_token], 0.0]]
+    completed_captions = []
 
     for step in range(max_len):
         all_candidates = []
         for seq, score in candidates:
+            # If sequence already finished, preserve it in completed pool
             if seq[-1] == end_token:
-                all_candidates.append([seq, score])
+                completed_captions.append((seq, score))
                 continue
 
             padded_seq = pad_sequences([seq], maxlen=max_len, padding="post")
             preds = caption_model.predict([features, padded_seq], verbose=0)[0]
 
-            # Repetition penalty applied to active branch tokens
+            # 1. Repetition penalty: downweight words already in the current beam
             for token_id in seq:
                 if token_id in (start_token, end_token):
                     continue
                 preds[token_id] *= repetition_penalty
 
+            # 2. Minimum length guard: forbid endseq until min_length words are formed
+            if len(seq) - 1 < min_length:
+                preds[end_token] = 1e-12
+
+            # Convert to log-probabilities safely
             log_preds = np.log(np.maximum(preds, 1e-12))
             top_k_indices = np.argsort(log_preds)[-beam_index:]
 
             for idx in top_k_indices:
-                candidate = [seq + [idx], score + log_preds[idx]]
+                candidate = [seq + [int(idx)], score + float(log_preds[idx])]
                 all_candidates.append(candidate)
 
+        if not all_candidates:
+            break
+
+        # Length normalization factor (alpha = 0.7)
         ordered = sorted(
             all_candidates,
-            key=lambda x: x[1] / (len(x[0]) ** 0.7),
+            key=lambda x: x[1] / ((5.0 + len(x[0])) / 6.0) ** 0.7,
             reverse=True
         )
         candidates = ordered[:beam_index]
 
-        if all(cand[0][-1] == end_token for cand in candidates):
+        # Stop early if all top beams have reached end_token
+        if all(c[0][-1] == end_token for c in candidates):
+            completed_captions.extend(candidates)
             break
 
-    best_seq = candidates[0][0]
+    # Pick the best scoring candidate from completed or active beams
+    pool = completed_captions if completed_captions else candidates
+    best_candidate = sorted(
+        pool,
+        key=lambda x: x[1] / ((5.0 + len(x[0])) / 6.0) ** 0.7,
+        reverse=True
+    )[0]
+
+    best_seq = best_candidate[0]
     final_caption = [
         idx_to_word[idx]
         for idx in best_seq

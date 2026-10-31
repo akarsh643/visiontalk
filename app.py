@@ -1,111 +1,132 @@
 import os
-import io
-import json
-import numpy as np
+import tempfile
+import requests
 import streamlit as st
 from PIL import Image
 from gtts import gTTS
 
-from predict import (
-    load_all_artifacts,
-    generate_caption,
-    generate_caption_beam_search
-)
-
+# Configure application shell
 st.set_page_config(
-    page_title="VisionTalk - AI Image Captioning",
+    page_title="VisionTalk: Assistive Captioning",
     page_icon="👁️",
     layout="wide"
 )
 
-# Custom styling
-st.markdown("""
-    <style>
-    .main-header { font-size: 2.2rem; font-weight: 700; color: #1E88E5; margin-bottom: 0.2rem; }
-    .sub-header { font-size: 1.1rem; color: #555; margin-bottom: 1.5rem; }
-    .caption-box { padding: 1.2rem; border-radius: 8px; background-color: #f0f4f8; border-left: 5px solid #1E88E5; margin-top: 1rem; }
-    </style>
-""", unsafe_allow_html=True)
+# API Configuration
+API_BASE_URL = os.getenv("API_URL", "http://127.0.0.1:8080")
 
-st.markdown('<div class="main-header">👁️ VisionTalk: Multimodal Caption Generator</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Assistive Image Description using DenseNet201 + LSTM Sequence Modeling</div>', unsafe_allow_html=True)
+st.title("👁️ VisionTalk: AI Image Captioning")
+st.markdown("Accessible, AI-powered image descriptions serving assistive narration.")
 
-@st.cache_resource
-def get_cached_artifacts():
-    return load_all_artifacts()
+# Sidebar Configuration
+st.sidebar.header("Inference Settings")
 
-with st.spinner("Loading models and vocabulary..."):
-    feat_extractor, caption_model, word_to_idx, idx_to_word, max_len = get_cached_artifacts()
-
-# Sidebar options
-st.sidebar.header("Decoding Parameters")
-decoding_method = st.sidebar.radio(
-    "Choose Search Strategy:",
-    ("Beam Search (Fluent)", "Greedy Search (Fast)")
+decoding_strategy = st.sidebar.selectbox(
+    "Decoding Strategy",
+    options=["Greedy Search (Fast)", "Beam Search (Fluent)"],
+    index=1
 )
 
 beam_width = 3
-if decoding_method == "Beam Search (Fluent)":
-    beam_width = st.sidebar.slider("Beam Width (k):", min_value=1, max_value=7, value=3, step=1)
+if decoding_strategy == "Beam Search (Fluent)":
+    beam_width = st.sidebar.slider("Beam Width (k)", min_value=2, max_value=7, value=3, step=1)
+else:
+    beam_width = 1
 
-enable_tts = st.sidebar.checkbox("Enable Audio Narration (TTS)", value=True)
+repetition_penalty = st.sidebar.slider(
+    "Repetition Penalty",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.5,
+    step=0.05,
+    help="Values below 1.0 penalize repeated tokens to avoid loops."
+)
 
-# Main UI layout
-col1, col2 = st.columns([1, 1], gap="medium")
+# Check API Health Status
+try:
+    health_resp = requests.get(f"{API_BASE_URL}/health", timeout=3)
+    api_online = health_resp.status_code == 200 and health_resp.json().get("model_loaded", False)
+except requests.exceptions.RequestException:
+    api_online = False
+
+if api_online:
+    st.sidebar.success("Backend API: Online")
+else:
+    st.sidebar.error("Backend API: Offline. Ensure 'python api.py' is running on port 8080.")
+
+# Main Interface Layout
+col1, col2 = st.columns([1, 1], gap="large")
 
 with col1:
-    st.subheader("1. Input Image")
-    uploaded_file = st.file_uploader("Upload an image (JPG, JPEG, PNG)", type=["jpg", "jpeg", "png"])
-    
+    st.subheader("1. Upload Image")
+    uploaded_file = st.file_uploader(
+        "Choose a JPEG or PNG image...",
+        type=["jpg", "jpeg", "png"]
+    )
+
     if uploaded_file is not None:
         image = Image.open(uploaded_file)
         st.image(image, caption="Uploaded Image", use_container_width=True)
-        
-        temp_img_path = "temp_uploaded_img.jpg"
-        image.convert("RGB").save(temp_img_path)
 
 with col2:
     st.subheader("2. Generated Description")
+
     if uploaded_file is not None:
-        if st.button("Generate Caption", type="primary", use_container_width=True):
-            with st.spinner("Analyzing image features and generating sequence..."):
-                if decoding_method == "Greedy Search (Fast)":
-                    caption = generate_caption(temp_img_path, feat_extractor, caption_model, word_to_idx, idx_to_word, max_len)
-                else:
-                    caption = generate_caption_beam_search(temp_img_path, feat_extractor, caption_model, word_to_idx, idx_to_word, max_len, beam_index=beam_width)
-            
-            st.markdown(f"""
-                <div class="caption-box">
-                    <h4 style="margin: 0; color: #0D47A1;">Predicted Description:</h4>
-                    <p style="font-size: 1.25rem; font-weight: 500; margin: 0.5rem 0 0 0; color: #212121;">"{caption}"</p>
-                </div>
-            """, unsafe_allow_html=True)
+        generate_button = st.button("Generate Caption & Audio", type="primary", disabled=not api_online)
 
-            # Audio narration for accessibility
-            if enable_tts:
-                st.write("")
-                st.markdown("**🔊 Audio Output (Assistive Tech):**")
-                
-                clean_text = caption.strip()
-                if not clean_text:
-                    st.warning("Caption is empty, cannot generate audio.")
-                else:
-                    audio_path = "output_caption.mp3"
-                    try:
-                        with st.spinner("Generating speech audio..."):
-                            tts = gTTS(text=clean_text, lang='en', slow=False)
-                            tts.save(audio_path)
-                        
-                        with open(audio_path, "rb") as f:
-                            audio_bytes = f.read()
-                        
-                        st.audio(audio_bytes, format='audio/mp3')
-                        st.success("Audio synthesized successfully!")
-                    except Exception as e:
-                        st.error(f"TTS Error: {e}")
-                        st.info("Tip: gTTS requires an active internet connection. If WSL cannot resolve external DNS, test connection with: ping google.com")
+        if generate_button:
+            with st.spinner("Communicating with FastAPI inference server..."):
+                try:
+                    # Prepare file payload for multipart/form-data
+                    uploaded_file.seek(0)
+                    files = {
+                        "file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)
+                    }
+                    params = {
+                        "beam": beam_width,
+                        "penalty": repetition_penalty
+                    }
 
-            if os.path.exists(temp_img_path):
-                os.remove(temp_img_path)
+                    response = requests.post(
+                        f"{API_BASE_URL}/predict",
+                        files=files,
+                        params=params,
+                        timeout=30
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        caption = data.get("caption", "No caption returned.")
+                        strategy = data.get("strategy", decoding_strategy)
+
+                        st.success(f"Strategy: {strategy}")
+                        st.markdown(
+                            f"""
+                            <div style="background-color: #f0f2f6; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+                                <h3 style="margin: 0; color: #1f2937;">{caption}</h3>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+
+                        # Audio narration synthesis via gTTS
+                        with st.spinner("Synthesizing audio narration..."):
+                            tts = gTTS(text=caption, lang="en", slow=False)
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+                                tts.save(fp.name)
+                                audio_path = fp.name
+
+                            with open(audio_path, "rb") as audio_file:
+                                audio_bytes = audio_file.read()
+                            st.audio(audio_bytes, format="audio/mp3")
+
+                            if os.path.exists(audio_path):
+                                os.remove(audio_path)
+
+                    else:
+                        st.error(f"Inference error ({response.status_code}): {response.text}")
+
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Failed to communicate with API server: {e}")
     else:
-        st.info("Upload an image on the left to see caption generation and hear audio playback.")
+        st.info("Upload an image on the left column to get started.")
