@@ -1,10 +1,26 @@
-fastapi>=0.100.0
+# Deep Learning & Numerical Computing
+tensorflow>=2.15.0
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0
+
+# Image Processing & NLP
+pillow>=10.0.0
+nltk>=3.8.1
+
+# Backend API
+fastapi>=0.104.0
 uvicorn[standard]>=0.23.0
 python-multipart>=0.0.6
-pydantic>=2.0
-Pillow>=9.0.0
-numpy>=1.24.3,<2.0.0
-tensorflow-cpu>=2.15.0,<2.17.0
-gTTS>=2.5.0
+
+# Frontend & Audio
+streamlit>=1.28.0
+gTTS>=2.4.0
+
+# Testing & Client
+pytest>=7.4.0
+httpx>=0.25.0
 requests>=2.31.0
-streamlit>=1.30.0
+
+# Utilities
+tqdm>=4.66.0
+matplotlib>=3.7.0
