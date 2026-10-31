@@ -1,22 +1,56 @@
 import argparse
 import json
 import os
+from pathlib import Path
+
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.applications.densenet import DenseNet201, preprocess_input
-from tensorflow.keras.models import Model, load_model
-from tensorflow.keras.preprocessing.image import img_to_array, load_img
-from tensorflow.keras.preprocessing.sequence import pad_sequences
 
+try:
+    import tensorflow as tf
+    from tensorflow.keras.applications.densenet import DenseNet201, preprocess_input
+    from tensorflow.keras.models import Model, load_model
+    from tensorflow.keras.preprocessing.image import img_to_array, load_img
+    from tensorflow.keras.preprocessing.sequence import pad_sequences
+except ImportError:  # pragma: no cover - TensorFlow is optional at import time.
+    tf = None  # type: ignore[assignment]
+    DenseNet201 = None  # type: ignore[assignment]
+    preprocess_input = None  # type: ignore[assignment]
+    Model = None  # type: ignore[assignment]
+    load_model = None  # type: ignore[assignment]
+    img_to_array = None  # type: ignore[assignment]
+    load_img = None  # type: ignore[assignment]
+    pad_sequences = None  # type: ignore[assignment]
+
+# Suppress TensorFlow startup logs
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-MODEL_PATH = "models/best_model.keras"
-VOCAB_PATH = "data/word_to_idx.json"
-METADATA_PATH = "data/dataset_metadata.json"
+
+def _require_tensorflow():
+    if (
+        tf is None
+        or DenseNet201 is None
+        or preprocess_input is None
+        or Model is None
+        or load_model is None
+        or img_to_array is None
+        or load_img is None
+        or pad_sequences is None
+    ):
+        raise ImportError(
+            "TensorFlow and the Keras dependencies are required to run this script."
+        )
+    return tf
+
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = BASE_DIR / "models" / "best_model.keras"
+VOCAB_PATH = BASE_DIR / "data" / "word_to_idx.json"
+METADATA_PATH = BASE_DIR / "data" / "dataset_metadata.json"
 
 
 def load_all_artifacts():
     print("Loading models and vocabulary...")
+
     base_dense = DenseNet201(weights="imagenet")
     feat_extractor = Model(
         inputs=base_dense.inputs, outputs=base_dense.layers[-2].output
@@ -31,64 +65,65 @@ def load_all_artifacts():
     with open(METADATA_PATH, "r", encoding="utf-8") as f:
         metadata = json.load(f)
 
-    return (
-        feat_extractor,
-        caption_model,
-        word_to_idx,
-        idx_to_word,
-        metadata["max_seq_len"],
-    )
+    max_len = int(metadata.get("max_length", metadata.get("max_seq_len", 35)))
+
+    return feat_extractor, caption_model, word_to_idx, idx_to_word, max_len
+
+
+def extract_features(image_path, feat_extractor):
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Cannot find image: {image_path}")
+    img = load_img(image_path, target_size=(224, 224))
+    img_arr = img_to_array(img)
+    img_arr = np.expand_dims(img_arr, axis=0)
+    img_arr = preprocess_input(img_arr)
+    return feat_extractor.predict(img_arr, verbose=0).reshape(1, -1)
 
 
 def generate_caption(image_path, feat_extractor, caption_model, word_to_idx, idx_to_word, max_len):
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Cannot find image: {image_path}")
+    features = extract_features(image_path, feat_extractor)
 
-    img = load_img(image_path, target_size=(224, 224))
-    img_arr = img_to_array(img)
-    img_arr = np.expand_dims(img_arr, axis=0)
-    img_arr = preprocess_input(img_arr)
-    features = feat_extractor.predict(img_arr, verbose=0).reshape(1, -1)
+    start_token = word_to_idx.get("start", word_to_idx.get("startseq", 1))
+    end_token = word_to_idx.get("end", word_to_idx.get("endseq", 2))
+    pad_token = word_to_idx.get("<pad>", 0)
+    unk_token = word_to_idx.get("<unk>", 1)
 
-    start_word = "start" if "start" in word_to_idx else "startseq"
-    in_text = start_word
+    in_text = [start_token]
 
     for _ in range(max_len):
-        seq = [
-            word_to_idx.get(w, word_to_idx.get("<unk>", 1))
-            for w in in_text.split()
-        ]
-        seq = pad_sequences([seq], maxlen=max_len, padding="post")
-
+        seq = pad_sequences([in_text], maxlen=max_len, padding="post")
         preds = caption_model.predict(
-            {"image_input": features, "caption_input": seq},
-            verbose=0,
-        )
-        pred_idx = int(np.argmax(preds[0]))
-        pred_word = idx_to_word.get(pred_idx, None)
+            {"image_input": features, "caption_input": seq}, verbose=0
+        )[0]
 
-        if pred_word is None or pred_word in ["end", "endseq", "<unk>", "<pad>"]:
+        # Suppress padding, unk, and immediate repetition
+        preds[pad_token] = 0.0
+        preds[unk_token] = 0.0
+        if len(in_text) > 1:
+            preds[in_text[-1]] *= 0.5
+
+        pred_idx = int(np.argmax(preds))
+
+        if pred_idx == end_token or pred_idx == pad_token:
             break
 
-        in_text += " " + pred_word
+        in_text.append(pred_idx)
 
-    words = [w for w in in_text.split() if w not in ["start", "startseq"]]
-    return " ".join(words)
+    caption_words = [
+        idx_to_word.get(idx)
+        for idx in in_text
+        if idx not in {start_token, end_token, pad_token, unk_token}
+    ]
+    return " ".join([w for w in caption_words if w])
 
 
 def generate_caption_beam_search(image_path, feat_extractor, caption_model, word_to_idx, idx_to_word, max_len, beam_index=3):
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Cannot find image: {image_path}")
+    features = extract_features(image_path, feat_extractor)
 
-    img = load_img(image_path, target_size=(224, 224))
-    img_arr = img_to_array(img)
-    img_arr = np.expand_dims(img_arr, axis=0)
-    img_arr = preprocess_input(img_arr)
-    features = feat_extractor.predict(img_arr, verbose=0).reshape(1, -1)
-
-    # Use 'start' or 'startseq'
     start_token = word_to_idx.get("start", word_to_idx.get("startseq", 1))
     end_token = word_to_idx.get("end", word_to_idx.get("endseq", 2))
+    pad_token = word_to_idx.get("<pad>", 0)
+    unk_token = word_to_idx.get("<unk>", 1)
 
     sequences = [[[start_token], 0.0]]
     completed_sequences = []
@@ -102,9 +137,11 @@ def generate_caption_beam_search(image_path, feat_extractor, caption_model, word
 
             padded_seq = pad_sequences([seq], maxlen=max_len, padding="post")
             preds = caption_model.predict(
-                {"image_input": features, "caption_input": padded_seq},
-                verbose=0,
+                {"image_input": features, "caption_input": padded_seq}, verbose=0
             )[0]
+
+            preds[pad_token] = 1e-12
+            preds[unk_token] = 1e-12
 
             top_k_indices = np.argsort(preds)[-beam_index:]
 
@@ -116,20 +153,18 @@ def generate_caption_beam_search(image_path, feat_extractor, caption_model, word
         if not all_candidates:
             break
 
-        ordered = sorted(all_candidates, key=lambda tup: tup[1] / max(len(tup[0]), 1))
+        ordered = sorted(all_candidates, key=lambda item: item[1] / max(len(item[0]), 1))
         sequences = ordered[:beam_index]
 
-    all_final = completed_sequences if completed_sequences else sequences
-    best_seq = sorted(all_final, key=lambda tup: tup[1] / max(len(tup[0]), 1))[0][0]
+    candidates_to_rank = completed_sequences if completed_sequences else sequences
+    best_seq = sorted(candidates_to_rank, key=lambda item: item[1] / max(len(item[0]), 1))[0][0]
 
-    final_caption = []
-    for idx in best_seq:
-        word = idx_to_word.get(idx, "")
-        if word in ["start", "end", "startseq", "endseq", "<unk>", "<pad>"]:
-            continue
-        final_caption.append(word)
-
-    return " ".join(final_caption)
+    final_caption = [
+        idx_to_word.get(idx, "")
+        for idx in best_seq
+        if idx not in {start_token, end_token, pad_token, unk_token}
+    ]
+    return " ".join([w for w in final_caption if w])
 
 
 if __name__ == "__main__":
@@ -140,11 +175,14 @@ if __name__ == "__main__":
 
     feat_ext, cap_model, w2i, i2w, max_len = load_all_artifacts()
 
+    print("\nRunning Greedy Search...")
     greedy_cap = generate_caption(args.image, feat_ext, cap_model, w2i, i2w, max_len)
+
+    print(f"Running Beam Search (k={args.beam})...")
     beam_cap = generate_caption_beam_search(args.image, feat_ext, cap_model, w2i, i2w, max_len, beam_index=args.beam)
 
     print("\n" + "=" * 60)
-    print(f"Image:        {args.image}")
-    print(f"Greedy:       {greedy_cap.capitalize()}")
-    print(f"Beam (k={args.beam}):  {beam_cap.capitalize()}")
+    print(f"Image:       {args.image}")
+    print(f"Greedy:      {greedy_cap.capitalize() if greedy_cap else 'No caption generated'}")
+    print(f"Beam (k={args.beam}): {beam_cap.capitalize() if beam_cap else 'No caption generated'}")
     print("=" * 60 + "\n")

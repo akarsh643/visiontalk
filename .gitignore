@@ -35,3 +35,20 @@ models/*.keras
 models/*.h5
 .venv/
 __pycache__/
+# Virtual environments
+.venv/
+env/
+venv/
+__pycache__/
+*.pyc
+
+# Large data & model binaries
+data/Images/
+models/*.keras
+models/*.h5
+temp_uploaded_img.jpg
+
+# VS Code & OS caches
+.vscode/
+.DS_Store
+*.ipynb_checkpoints/
